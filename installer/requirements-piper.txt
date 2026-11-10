@@ -1,0 +1,2 @@
+# German voice (Piper). Installed with --no-deps so it never pulls in a second onnxruntime.
+piper-tts==1.8.0

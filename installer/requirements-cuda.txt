@@ -1,0 +1,10 @@
+# NVIDIA GPU: replaces the CPU onnxruntime. Needs an NVIDIA driver 580 or newer (CUDA 13).
+# The CUDA/cuDNN runtime libraries come as pip wheels, so no system-wide CUDA install is needed.
+onnxruntime-gpu==1.31.1
+nvidia-cuda-runtime==13.4.92
+nvidia-cublas==13.8.0.4
+nvidia-cudnn-cu13==9.27.0.42
+nvidia-cufft==12.4.0.43
+nvidia-curand==10.4.4.72
+nvidia-cuda-nvrtc==13.4.92
+nvidia-nvjitlink==13.4.92

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -52,10 +53,15 @@ _jobs: dict[str, dict] = {}
 def _prepare(language: str, voice: str, text: str):
     """Validate the voice, resolve engine + language, load the engine (stdout kept clean)."""
     if voice and voice not in _all_voices():
-        raise ValueError(f"unknown voice {voice!r}; call list_voices")
+        raise ToolError(f"unknown voice {voice!r}; call list_voices")
     kind, voice, lang = rb.resolve(language, voice, text)
-    with contextlib.redirect_stdout(sys.stderr):  # keep stdout clean for MCP
-        eng = rb.get_engine(kind, voice, "auto")
+    try:
+        with contextlib.redirect_stdout(sys.stderr):  # keep stdout clean for MCP
+            eng = rb.get_engine(kind, voice, "auto")
+    except (ImportError, FileNotFoundError) as e:
+        what = "English (Kokoro)" if kind == "kokoro" else "German (Piper)"
+        raise ToolError(f"{what} voices are not installed ({e}). Re-run the Audiobook-MCP setup and tick "
+                        "that voice, or pick a language that is installed.") from e
     return eng, voice, lang
 
 
@@ -86,7 +92,9 @@ def _needs_confirmation(chars: int, confirm: bool) -> dict | None:
 
 
 def _voices() -> list[str]:
-    """Kokoro voices (English and other Kokoro languages)."""
+    """Kokoro voices (English and other Kokoro languages); empty if Kokoro isn't installed."""
+    if not rb.VOICES.exists():
+        return []
     with np.load(rb.VOICES) as z:
         return sorted(z.files)
 
@@ -119,13 +127,13 @@ def synthesize_text(text: str, output_path: str, voice: str = "", speed: float =
     medium). Above 20,000 characters it does nothing and returns needs_confirmation with a
     time estimate: ask the user, then repeat the call with confirm=true."""
     if not text.strip():
-        raise ValueError("text is empty")
+        raise ToolError("text is empty")
     ask = _needs_confirmation(len(text), confirm)
     if ask:
         return ask
     out = Path(output_path)
     if out.suffix.lower() != ".mp3":
-        raise ValueError("output_path must end with .mp3")
+        raise ToolError("output_path must end with .mp3")
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_suffix(".mp3.part")
     with _lock:
@@ -165,13 +173,13 @@ def synthesize_markdown(markdown: str, output_path: str, voice: str = "",
     if ask:
         return ask
     if voice and voice not in _all_voices():
-        raise ValueError(f"unknown voice {voice!r}; call list_voices")
+        raise ToolError(f"unknown voice {voice!r}; call list_voices")
     out = Path(output_path)
     if out.suffix.lower() != ".mp3":
-        raise ValueError("output_path must end with .mp3")
+        raise ToolError("output_path must end with .mp3")
     md_title, blocks = rb.markdown_blocks(markdown)
     if not blocks:
-        raise ValueError("no speakable text found in markdown")
+        raise ToolError("no speakable text found in markdown")
     out.parent.mkdir(parents=True, exist_ok=True)
     if len(markdown) > BACKGROUND_ABOVE_CHARS:
         # Long input: run as a background job so the call returns at once (no client timeout).
@@ -222,9 +230,9 @@ def start_book_render(input_dir: str, output_dir: str, voice: str = "",
     inp = Path(input_dir)
     if not inp.is_dir() or not any(f for pat in ("*.html", "*.md", "*.markdown")
                                    for f in inp.glob(pat)):
-        raise ValueError(f"no .html or .md files in {input_dir}")
+        raise ToolError(f"no .html or .md files in {input_dir}")
     if voice and voice not in _all_voices():
-        raise ValueError(f"unknown voice {voice!r}; call list_voices")
+        raise ToolError(f"unknown voice {voice!r}; call list_voices")
     job_id, log = _spawn_job(inp, Path(output_dir), voice, speed, artist, album,
                              language=language)
     return {"job_id": job_id, "log": str(log)}
@@ -236,13 +244,13 @@ def _spawn_job(inp: Path, out_dir: Path, voice: str, speed: float, artist: str =
     """Start render_book.py as a background process. One GPU job at a time."""
     running = [j for j, v in _jobs.items() if v["proc"].poll() is None]
     if running:
-        raise RuntimeError(f"job {running[0]} is still running; wait for it to finish or "
+        raise ToolError(f"job {running[0]} is still running; wait for it to finish or "
                            "cancel it with cancel_render_job")
     job_id = time.strftime("%Y%m%d-%H%M%S")
     log = JOBS_DIR / f"{job_id}.log"
     cmd = [sys.executable, "-X", "utf8", str(HERE / "render_book.py"), str(inp), str(out_dir),
            "--voice", voice, "--lang", language, "--speed", str(speed)]
-    # Always pass these (empty = no tag) so MCP jobs don't inherit render_book's Hamlet defaults.
+    # Always pass these explicitly (empty = no tag).
     cmd += ["--artist", artist, "--album", album]
     if title:
         cmd += ["--title", title]
@@ -259,7 +267,7 @@ def _spawn_job(inp: Path, out_dir: Path, voice: str, speed: float, artist: str =
 def _status(job_id: str) -> dict:
     j = _jobs.get(job_id)
     if j is None:
-        raise ValueError(f"unknown job_id {job_id!r}")
+        raise ToolError(f"unknown job_id {job_id!r}")
     text = j["log"].read_text(encoding="utf-8", errors="replace")
     done = re.findall(r"^\s*done (\S+\.mp3): (.+)$", text, re.M)
     cur = re.findall(r"^\[(\d+)/(\d+)\] (\S+)\s+title=", text, re.M)
@@ -297,7 +305,7 @@ def cancel_render_job(job_id: str) -> dict:
     job again resumes after them."""
     j = _jobs.get(job_id)
     if j is None:
-        raise ValueError(f"unknown job_id {job_id!r}")
+        raise ToolError(f"unknown job_id {job_id!r}")
     proc = j["proc"]
     if proc.poll() is not None:
         return {"job_id": job_id, "cancelled": False,

@@ -26,6 +26,9 @@ samples/
 samples_de/
 mp3/
 
+# --- Installer build output (build it with Inno Setup; release the .exe on GitHub) ---
+installer/Output/
+
 # --- Job state written by the MCP server --------------------------------------
 jobs/
 *.log

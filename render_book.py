@@ -5,7 +5,7 @@ Piper (CPU) for German, default voice de_DE-thorsten-medium.
 
 Usage:
   render_book.py INPUT_DIR OUTPUT_DIR [--artist A] [--album B] [--voice V]
-                 [--lang auto|en|de|<kokoro code>] [--speed S] [--provider auto|cuda|dml|cpu]
+                 [--lang auto|en|de|<kokoro code>] [--speed S] [--provider auto|cuda|cpu]
   render_book.py --test [--lang de] [--out-file OUTPUT_FILE.mp3]
 
 --lang auto (default) guesses English vs German per file. Without --voice the defaults are
@@ -27,12 +27,17 @@ VOICES = HERE / "models" / "voices-v1.0.bin"
 SR = 24000
 PAUSE_HEADING = 1.2
 PAUSE_PARA = 0.45
+# ffmpeg: prefer a copy bundled by the installer (<app>\ffmpeg\bin\ffmpeg.exe), else use PATH.
+_LOCAL_FFMPEG = HERE / "ffmpeg" / "bin" / "ffmpeg.exe"
+FFMPEG = str(_LOCAL_FFMPEG) if _LOCAL_FFMPEG.exists() else "ffmpeg"
 EN_DEFAULT_VOICE = "af_sky"
 DE_DEFAULT_VOICE = "de_DE-thorsten-medium"
 PIPER_DIR = HERE / "models" / "piper"
 
 
 def make_kokoro(provider_pref):
+    if not MODEL.exists() or not VOICES.exists():
+        raise FileNotFoundError(f"Kokoro model files not found in {MODEL.parent}")
     import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
@@ -44,11 +49,11 @@ def make_kokoro(provider_pref):
             print(f"[warn] preload_dlls failed: {e}")
 
     avail = ort.get_available_providers()
+    # DirectML is deliberately not offered: the Kokoro v1.0 model fails in its ConvTranspose layers there.
     order = {
         "cuda": ["CUDAExecutionProvider"],
-        "dml": ["DmlExecutionProvider"],
         "cpu": [],
-        "auto": ["CUDAExecutionProvider", "DmlExecutionProvider"],
+        "auto": ["CUDAExecutionProvider"],
     }[provider_pref]
     providers = [p for p in order if p in avail] + ["CPUExecutionProvider"]
     so = ort.SessionOptions()
@@ -233,7 +238,7 @@ def markdown_blocks(md):
 
 
 def start_ffmpeg(out_part, tags, sr=SR):
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1",
+    cmd = [FFMPEG, "-y", "-loglevel", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1",
            "-i", "pipe:0", "-c:a", "libmp3lame", "-b:a", "64k", "-id3v2_version", "3"]
     for k, v in tags.items():
         if v:  # skip empty tags
@@ -282,7 +287,7 @@ def run_test(a):
     else:
         blocks = [("h1", "Test of the Kokoro voice."),
                   ("p", "The quick brown fox jumps over the lazy dog, while the holodeck hums quietly. "
-                        "Hamlet considers, once again, whether to be or not to be.")]
+                        "She considers, once again, whether to be or not to be.")]
     kind, voice, lang = resolve(a.lang, a.voice, " ".join(t for _, t in blocks))
     eng = get_engine(kind, voice, a.provider)
     print(f"[engine] {kind} voice={voice} lang={lang} provider={eng.provider}")
@@ -354,14 +359,14 @@ def main():
     ap.add_argument("output_dir", nargs="?")
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--out-file")
-    ap.add_argument("--artist", default="Janet H. Murray")
-    ap.add_argument("--album", default="Hamlet on the Holodeck")
+    ap.add_argument("--artist", default="", help="ID3 artist (empty = no tag)")
+    ap.add_argument("--album", default="", help="ID3 album (empty = no tag)")
     ap.add_argument("--title", default="", help="override the ID3 title for every file")
     ap.add_argument("--voice", default="", help="default: af_sky (English) / "
                     "de_DE-thorsten-medium (German)")
     ap.add_argument("--lang", default="auto", help="auto, en, de, or a Kokoro lang code")
     ap.add_argument("--speed", type=float, default=1.0)
-    ap.add_argument("--provider", default="auto", choices=["auto", "cuda", "dml", "cpu"])
+    ap.add_argument("--provider", default="auto", choices=["auto", "cuda", "cpu"])
     a = ap.parse_args()
     if a.test:
         run_test(a)

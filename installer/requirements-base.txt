@@ -1,0 +1,5 @@
+# Always installed. onnxruntime here is the CPU build; the installer swaps it for the GPU build if chosen.
+numpy==2.5.4
+soundfile==0.14.0
+mcp==2.3.0
+onnxruntime==1.31.1
