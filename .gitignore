@@ -29,6 +29,14 @@ mp3/
 # --- Installer build output (build it with Inno Setup; release the .exe on GitHub) ---
 installer/Output/
 
+# --- Files the installer creates inside an install folder ----------------------
+# (only matters if you install into a clone of this repo)
+/ffmpeg/
+/skills/
+install_state.json
+unins*.exe
+unins*.dat
+
 # --- Job state written by the MCP server --------------------------------------
 jobs/
 *.log
@@ -47,7 +55,8 @@ tmp/
 claude_desktop_config.json
 claude_desktop_config.json.bak*
 
-# --- Editors & OS ---------------------------------------------------------------
+# --- Editors, AI tools & OS ---------------------------------------------------
+.claude/
 .vscode/
 .idea/
 *.swp
