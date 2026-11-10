@@ -1,0 +1,58 @@
+# --- Python environment & caches -------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# --- Model files (large; downloaded by the setup script, not committed) ------
+# Kokoro: kokoro-v1.0.onnx (~325 MB), voices-v1.0.bin; Piper: de_DE-*.onnx (+ .json)
+models/
+*.onnx
+*.onnx.json
+voices-*.bin
+
+# --- Generated audio & render output ----------------------------------------
+# Never commit rendered audiobooks: they are derived from copyrighted books.
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+*.part
+samples/
+samples_de/
+mp3/
+
+# --- Job state written by the MCP server --------------------------------------
+jobs/
+*.log
+
+# --- Local test scratch -------------------------------------------------------
+test.mp3
+mcp_test.mp3
+mcp_md_test.mp3
+scratch/
+tmp/
+*.tmp
+
+# --- Local config / secrets ---------------------------------------------------
+.env
+.env.*
+claude_desktop_config.json
+claude_desktop_config.json.bak*
+
+# --- Editors & OS ---------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Keep (documented exceptions) ---------------------------------------------
+# Packaged Claude skills are small and meant to be shared:
+!claude_skills/
+!claude_skills/*.skill
