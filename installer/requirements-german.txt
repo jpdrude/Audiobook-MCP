@@ -1,0 +1,2 @@
+# German voice (Martin): English-term detection. The voice itself runs on kokoro-onnx (requirements-kokoro.txt).
+wordfreq==3.1.1

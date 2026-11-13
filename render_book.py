@@ -1,7 +1,8 @@
 """Render HTML/Markdown chapters to MP3 with local neural TTS.
 
 Engines: Kokoro (kokoro-onnx, GPU if possible) for English and other Kokoro languages;
-Piper (CPU) for German, default voice de_DE-thorsten-medium.
+"Martin" (a German Kokoro fine-tune, same runtime) for German. German text is prepared first: years are
+spoken the German way and English terms inside German text get English pronunciation (see german_prep.py).
 
 Usage:
   render_book.py INPUT_DIR OUTPUT_DIR [--artist A] [--album B] [--voice V]
@@ -9,7 +10,7 @@ Usage:
   render_book.py --test [--lang de] [--out-file OUTPUT_FILE.mp3]
 
 --lang auto (default) guesses English vs German per file. Without --voice the defaults are
-af_sky (English) and de_DE-thorsten-medium (German).
+af_sky (English) and martin (German).
 """
 import argparse
 import html
@@ -31,13 +32,25 @@ PAUSE_PARA = 0.45
 _LOCAL_FFMPEG = HERE / "ffmpeg" / "bin" / "ffmpeg.exe"
 FFMPEG = str(_LOCAL_FFMPEG) if _LOCAL_FFMPEG.exists() else "ffmpeg"
 EN_DEFAULT_VOICE = "af_sky"
-DE_DEFAULT_VOICE = "de_DE-thorsten-medium"
-PIPER_DIR = HERE / "models" / "piper"
+# German voice: the Kokoro-architecture fine-tune "Martin" (community model, Apache 2.0)
+MARTIN_DIR = HERE / "models" / "kokoro-de-martin"
+MARTIN_MODEL = MARTIN_DIR / "kokoro-martin.onnx"
+MARTIN_VOICES = MARTIN_DIR / "voices-martin.npz"
+MARTIN_VOICE = "martin"
+LEXICON_DIRS = [str(HERE)]   # where english_terms.txt / german_words.txt are looked up (input folder is added)
 
 
-def make_kokoro(provider_pref):
-    if not MODEL.exists() or not VOICES.exists():
-        raise FileNotFoundError(f"Kokoro model files not found in {MODEL.parent}")
+def martin_available():
+    return MARTIN_MODEL.exists() and MARTIN_VOICES.exists()
+
+
+def default_german_voice():
+    return MARTIN_VOICE
+
+
+def make_kokoro(provider_pref, model=MODEL, voices=VOICES):
+    if not Path(model).exists() or not Path(voices).exists():
+        raise FileNotFoundError(f"Kokoro model files not found in {Path(model).parent}")
     import onnxruntime as ort
     from kokoro_onnx import Kokoro
 
@@ -58,10 +71,10 @@ def make_kokoro(provider_pref):
     providers = [p for p in order if p in avail] + ["CPUExecutionProvider"]
     so = ort.SessionOptions()
     so.log_severity_level = 3  # silence harmless warnings
-    sess = ort.InferenceSession(str(MODEL), sess_options=so, providers=providers)
+    sess = ort.InferenceSession(str(model), sess_options=so, providers=providers)
     used = sess.get_providers()[0]
     print(f"[provider] requested={providers} active={sess.get_providers()} -> using {used}")
-    return Kokoro.from_session(sess, str(VOICES)), used
+    return Kokoro.from_session(sess, str(voices)), used
 
 
 _DE_WORDS = set("""der die das und ist nicht ein eine einer mit für auf den dem von sich auch wir ich
@@ -85,10 +98,10 @@ def resolve(lang_arg, voice_arg, sample_text=""):
     lang = (lang_arg or "auto").lower()
     voice = voice_arg or ""
     if lang == "auto":
-        lang = "de" if (voice.startswith("de_") or detect_language(sample_text) == "de") else "en"
-    if voice.startswith("de_") or (lang.startswith("de") and not voice):
-        return "piper", voice or DE_DEFAULT_VOICE, "de"
-    if lang.startswith("de"):                 # explicit non-German voice reading German
+        lang = "de" if (voice == MARTIN_VOICE or detect_language(sample_text) == "de") else "en"
+    if voice == MARTIN_VOICE or (lang.startswith("de") and not voice):   # default German voice
+        return "martin", MARTIN_VOICE, "de"
+    if lang.startswith("de"):                 # explicit non-German Kokoro voice reading German
         return "kokoro", voice, "de"
     voice = voice or EN_DEFAULT_VOICE
     if lang in ("en", "english"):
@@ -109,39 +122,49 @@ class KokoroEngine:
         return s, sr
 
 
-class PiperEngine:
-    kind = "piper"
-    provider = "CPUExecutionProvider"
+class MartinEngine:
+    """German Kokoro fine-tune. Text is converted to phonemes first (german_prep): English terms get English
+    pronunciation, years are spoken the German way."""
 
-    def __init__(self, voice):
-        from piper import PiperVoice
+    kind = "martin"
 
-        model = PIPER_DIR / f"{voice}.onnx"
-        if not model.exists():
-            raise FileNotFoundError(f"Piper voice model not found: {model}")
-        self.voice_name = voice
-        self.v = PiperVoice.load(str(model))
-        self.sr = self.v.config.sample_rate
+    def __init__(self, provider_pref):
+        import german_prep
+
+        self.k, self.provider = make_kokoro(provider_pref, MARTIN_MODEL, MARTIN_VOICES)
+        self.sr = SR
+        self._prep = german_prep
+        self._lex = german_prep.Lexicon(LEXICON_DIRS)
+        self.en_lang = "en-us"
 
     def synth(self, text, voice=None, lang=None, speed=1.0):
-        from piper import SynthesisConfig
-
-        cfg = SynthesisConfig(length_scale=1.0 / speed) if speed != 1.0 else None
-        chunks = list(self.v.synthesize(text, cfg))
-        if not chunks:
-            return np.zeros(0, dtype=np.float32), self.sr
-        return np.concatenate([c.audio_float_array for c in chunks]).astype(np.float32), self.sr
+        ph = self._prep.to_phonemes(text, self.k.tokenizer, self._lex, self.en_lang)
+        if not ph.strip():
+            return np.zeros(0, dtype=np.float32), SR
+        s, sr = self.k.create(ph, voice=MARTIN_VOICE, speed=speed, lang="de", is_phonemes=True)
+        assert sr == SR, sr
+        return s, sr
 
 
 _engines = {}
 
 
 def get_engine(kind, voice, provider_pref="auto"):
-    """Engines are cached; one Kokoro session, one Piper model per voice."""
-    key = ("kokoro",) if kind == "kokoro" else ("piper", voice)
-    if key not in _engines:
-        _engines[key] = KokoroEngine(provider_pref) if kind == "kokoro" else PiperEngine(voice)
-    return _engines[key]
+    """Engines are cached: one Kokoro session and one Martin session."""
+    if kind not in _engines:
+        _engines[kind] = KokoroEngine(provider_pref) if kind == "kokoro" else MartinEngine(provider_pref)
+    return _engines[kind]
+
+
+def alt_engine_for(engine, provider_pref="auto"):
+    """Engine for whole English blocks inside a German document (only when sample rates match)."""
+    if engine.kind != "martin" or not (MODEL.exists() and VOICES.exists()):
+        return None
+    try:
+        return get_engine("kokoro", EN_DEFAULT_VOICE, provider_pref)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] English voice unavailable, English blocks will be read by the German voice: {e}")
+        return None
 
 
 def extract(html_text):
@@ -255,12 +278,18 @@ def silence(sec, sr=SR):
     return np.zeros(int(sr * sec), dtype=np.float32)
 
 
-def synth_blocks(engine, blocks, voice, lang, speed, proc, label=""):
-    """Synthesize each block with `engine`; proc must have been started with engine.sr."""
+def synth_blocks(engine, blocks, voice, lang, speed, proc, label="", alt=None):
+    """Synthesize each block with `engine`; proc must have been started with engine.sr.
+
+    `alt` (an English engine with the same sample rate) reads whole English paragraphs, e.g. block quotes in a
+    German thesis; shorter English terms inside German paragraphs are handled by the engine itself."""
     total = 0.0
     n = len(blocks)
     for i, (kind, text) in enumerate(blocks, 1):
-        samples, sr = engine.synth(text, voice=voice, lang=lang, speed=speed)
+        if alt is not None and kind == "p" and len(text) > 60 and detect_language(text) == "en":
+            samples, sr = alt.synth(text, voice=EN_DEFAULT_VOICE, lang="en-us", speed=speed)
+        else:
+            samples, sr = engine.synth(text, voice=voice, lang=lang, speed=speed)
         write_audio(proc, samples)
         pause = silence(PAUSE_HEADING if kind in ("h1", "h2") else PAUSE_PARA, sr)
         write_audio(proc, pause)
@@ -309,6 +338,7 @@ def run_book(a):
     if not files:
         sys.exit(f"No .html or .md files in {inp}")
     outd.mkdir(parents=True, exist_ok=True)
+    LEXICON_DIRS.insert(0, str(inp))   # english_terms.txt / german_words.txt next to the chapters
     used = "?"
     nfiles = len(files)
     t_all, audio_all = time.perf_counter(), 0.0
@@ -326,15 +356,17 @@ def run_book(a):
         print(f"[{idx}/{nfiles}] {f.name}  title={title!r}  blocks={len(blocks)}", flush=True)
         kind, voice, lang = resolve(a.lang, a.voice, " ".join(t for _, t in blocks))
         eng = get_engine(kind, voice, a.provider)
+        alt = alt_engine_for(eng, a.provider)
         used = eng.provider
-        print(f"  [engine] {kind} voice={voice} lang={lang} provider={used}", flush=True)
+        print(f"  [engine] {kind} voice={voice} lang={lang} provider={used}"
+              + (" (+ English voice for English paragraphs)" if alt else ""), flush=True)
         part = final.with_suffix(".mp3.part")
         tags = {"title": a.title or title or f.stem, "artist": a.artist, "album": a.album,
                 "track": f"{idx}/{nfiles}"}
         proc = start_ffmpeg(part, tags, eng.sr)
         t0 = time.perf_counter()
         try:
-            audio = synth_blocks(eng, blocks, voice, lang, a.speed, proc)
+            audio = synth_blocks(eng, blocks, voice, lang, a.speed, proc, alt=alt)
             finish(proc, part, final)
         except BaseException:
             try:
@@ -362,8 +394,7 @@ def main():
     ap.add_argument("--artist", default="", help="ID3 artist (empty = no tag)")
     ap.add_argument("--album", default="", help="ID3 album (empty = no tag)")
     ap.add_argument("--title", default="", help="override the ID3 title for every file")
-    ap.add_argument("--voice", default="", help="default: af_sky (English) / "
-                    "de_DE-thorsten-medium (German)")
+    ap.add_argument("--voice", default="", help="default: af_sky (English) / martin (German)")
     ap.add_argument("--lang", default="auto", help="auto, en, de, or a Kokoro lang code")
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--provider", default="auto", choices=["auto", "cuda", "cpu"])

@@ -5,12 +5,14 @@ Fast, fully offline text-to-speech on your own PC, packaged as an **MCP server**
 
 - **English** is spoken by [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) through ONNX Runtime, on the
   GPU when one is available (default voice `af_sky`).
-- **German** is spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl) on the CPU (default voice
-  `de_DE-thorsten-medium`), because Kokoro ships no German voices.
+- **German** is spoken by "Martin", a community German fine-tune of the Kokoro architecture
+  ([Godelaune/Kokoro-82M-ONNX-German-Martin](https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin),
+  Apache 2.0), because the official Kokoro model ships no German voices. It runs on the same runtime and GPU.
 - Nothing leaves your machine. No API keys, no cloud.
 
-Measured on a Windows 11 laptop with an NVIDIA RTX PRO 500 (Blackwell): Kokoro on CUDA renders about 13-15x
-faster than real time (a 90-minute chapter in about 6 minutes); Piper on the CPU about 15-20x.
+Measured on a Windows 11 laptop with an NVIDIA RTX PRO 500 (Blackwell): English on CUDA renders about 13-15x
+faster than real time (a 90-minute chapter in about 6 minutes), German about 3x; on the CPU English runs about 3x
+and German only about 1x real time, so a GPU is recommended for German books.
 
 ## Features
 
@@ -18,6 +20,11 @@ faster than real time (a 90-minute chapter in about 6 minutes); Piper on the CPU
 - Resumable: it writes `.part` files and renames them when a chapter is finished, and skips chapters whose MP3
   already exists.
 - Language is chosen per file (`auto`, `en` or `de`), so a folder can mix English and German chapters.
+- German text is prepared before it is spoken (`german_prep.py`): years are read the German way (1913 becomes
+  "neunzehnhundertdreizehn"), English terms inside German sentences ("postcolonial turn", quoted words, titles)
+  are pronounced with English rules, and whole English paragraphs, such as block quotes in a thesis, are read by
+  the English voice. A few exceptions can be added with optional `english_terms.txt` and `german_words.txt`
+  files (one entry per line) next to the chapters, for example proper names that must not be switched.
 - Markdown input is cleaned for listening: bold, links, images, code fences, tables and front matter are not
   read aloud. Headings get a 1.2 s pause, paragraphs and list items 0.45 s.
 - Long jobs run in the background and can be polled and cancelled from the MCP client.
@@ -36,9 +43,10 @@ faster than real time (a 90-minute chapter in about 6 minutes); Piper on the CPU
 2 MB: the large parts are downloaded while installing, so the PC must be online). It installs for the current
 user only (no administrator rights) and lets you choose:
 
-- **Voices:** English (Kokoro, about 350 MB) and/or German (Piper, Thorsten medium, about 65 MB). Downloads are
-  verified against pinned SHA-256 checksums.
-- **Acceleration for English:** NVIDIA CUDA (preselected if an NVIDIA driver 580 or newer is found) or CPU.
+- **Voices:** English (Kokoro, about 350 MB) and/or German (Martin, about 330 MB). Downloads are verified against
+  pinned SHA-256 checksums.
+- **Acceleration:** NVIDIA CUDA (preselected if an NVIDIA driver 580 or newer is found) or CPU. German is slow on
+  the CPU (about real time), so choose CUDA if you can.
 - **MCP server in your AI apps:** it detects Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, LM Studio and
   Gemini CLI and adds the server to the ones you tick. Each changed config file is backed up first, files with
   comments are left alone, and the uninstaller removes only the entry it added.
@@ -53,7 +61,7 @@ ffmpeg if none is on `PATH`.
 Silent install, all choices on the command line:
 
 ```powershell
-Audiobook-MCP-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Tools\Audiobook-MCP" `
+Audiobook-MCP-Setup-0.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Tools\Audiobook-MCP" `
     /COMPONENTS="core,english,german" /ACCEL=cuda /MCPCLIENTS=claude-desktop,cursor `
     /SKILLS=all /SKILLTARGETS=export
 ```
@@ -100,12 +108,13 @@ Check which provider loads: `render_book.py --test` prints `provider=CUDAExecuti
 `CPUExecutionProvider`). If CUDA fails to load, the CUDA/cuDNN wheel versions do not match your `onnxruntime-gpu`
 build; the error message names the missing DLL.
 
-### German voice (Piper)
+### German voice (Martin)
 
-Install Piper **without dependencies**, so it does not pull in a second onnxruntime:
+Martin runs on `kokoro-onnx` as well, so nothing else is needed for the voice itself. English-term detection in
+German text uses the `wordfreq` word-frequency list:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install piper-tts --no-deps
+.\.venv\Scripts\python.exe -m pip install -r installer\requirements-german.txt
 ```
 
 ### Download the models
@@ -113,21 +122,22 @@ Install Piper **without dependencies**, so it does not pull in a second onnxrunt
 Models are not part of the repository. Put them in `models\` (the folder is git-ignored):
 
 ```powershell
-mkdir models, models\piper
+mkdir models, models\kokoro-de-martin
 
-# Kokoro (about 350 MB)
+# Kokoro, English (about 350 MB)
 $k = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 curl.exe -L --fail -o models\kokoro-v1.0.onnx $k/kokoro-v1.0.onnx
 curl.exe -L --fail -o models\voices-v1.0.bin  $k/voices-v1.0.bin
 
-# Piper German voice, Thorsten medium (about 60 MB)
-$p = "https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/medium"
-curl.exe -L --fail -o models\piper\de_DE-thorsten-medium.onnx      $p/de_DE-thorsten-medium.onnx
-curl.exe -L --fail -o models\piper\de_DE-thorsten-medium.onnx.json $p/de_DE-thorsten-medium.onnx.json
+# Martin, German (about 330 MB), pinned to a repository revision
+$m = "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804"
+curl.exe -L --fail -o models\kokoro-de-martin\kokoro-martin.onnx $m/kokoro-martin.onnx
+curl.exe -L --fail -o models\kokoro-de-martin\voices-martin.npz  $m/voices-martin.npz
 ```
 
-Other German voices from the [Piper voice catalog](https://huggingface.co/rhasspy/piper-voices) work too: drop
-the `.onnx` and `.onnx.json` files into `models\piper\` and they appear in `list_voices`.
+SHA-256 of the two Martin files: `c302f1d8bc7adf40a842cb550e18c39a5026bdb1afdd29dbb700b501cb49276b`
+(`kokoro-martin.onnx`) and `5b9c8553398d7abf67498ce500c186cefaa7b68fed3e3d415da5380670105acd`
+(`voices-martin.npz`).
 
 ## Command line
 
@@ -143,7 +153,7 @@ the `.onnx` and `.onnx.json` files into `models\piper\` and they appear in `list
 
 Options: `--lang auto|en|de|<kokoro code>` (default `auto`), `--voice NAME`, `--speed 1.0`,
 `--provider auto|cuda|cpu`, `--title` (override the ID3 title). Without `--voice` the defaults are `af_sky`
-(English) and `de_DE-thorsten-medium` (German).
+(English) and `martin` (German).
 
 `render_book.bat` does the same with a double-click: it activates the venv and asks for the input and output
 folders. Name chapter files `NN_Title.html` so they sort in reading order; track order and the default track
@@ -183,7 +193,7 @@ Notes:
 - `auto` is a small word-count heuristic. For short texts, or text full of quotations in another language, set
   `language` explicitly.
 - Giving a Kokoro voice together with German text makes that voice read German with an accent. Leave `voice`
-  empty for German to get Thorsten.
+  empty for German to get Martin.
 - Above 20,000 characters, `synthesize_text` and `synthesize_markdown` first return `needs_confirmation` with a
   time estimate; call again with `confirm=true` to proceed.
 - Only one background job runs at a time.
@@ -199,12 +209,15 @@ Notes:
 This project is MIT licensed (see `LICENSE`). It builds on, but does not include or redistribute:
 
 - [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) and the Kokoro-82M model
-- [Piper](https://github.com/OHF-Voice/piper1-gpl) and the voices in
-  [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) (Thorsten voice by Thorsten Mueller)
+- The German "Martin" model: ONNX export by Godelaune of
+  [kikiri-tts/kikiri-german-martin](https://huggingface.co/kikiri-tts/kikiri-german-martin), trained on a German
+  multispeaker base by dida-80b (voice recordings of Martin Harbecke, according to the model card)
+- [wordfreq](https://github.com/rspeer/wordfreq), used to tell English words from German ones
 - [ONNX Runtime](https://onnxruntime.ai/), [ffmpeg](https://ffmpeg.org/) and the
   [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
-Each of these has its own license, and Piper's is copyleft; check their repositories before redistributing
-anything built from them. The model files you download are covered by their own licenses, not by this one.
+Each of these has its own license; check their repositories before redistributing anything built from them. The
+Martin model is a community model whose provenance chain (Kokoro, a German multispeaker base, a single-speaker
+fine-tune, an ONNX export) is documented only on its model cards. The model files you download are covered by their own licenses, not by this one.
 
 Rendering audio from a copyrighted book is fine for your own use, but do not redistribute the resulting MP3s.

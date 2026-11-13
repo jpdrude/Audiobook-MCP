@@ -10,7 +10,7 @@
 ;             /SKILLS=none|all|pdf-to-mp3,text-to-mp3  /SKILLTARGETS=none|all|export,claude-code
 
 #define MyAppName "Audiobook-MCP"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "Jan Philipp Drude"
 #define MyAppURL "https://github.com/jpdrude/Audiobook-MCP"
 
@@ -47,11 +47,12 @@ Name: "custom"; Description: "Custom"; Flags: iscustom
 [Components]
 Name: "core"; Description: "MCP server, renderer and Python environment"; Types: full custom; Flags: fixed
 Name: "english"; Description: "English voices (Kokoro, about 350 MB download)"; Types: full custom
-Name: "german"; Description: "German voice (Piper, Thorsten medium, about 65 MB download)"; Types: full custom
+Name: "german"; Description: "German voice (Martin, about 330 MB download)"; Types: full custom
 
 [Files]
 Source: "..\kokoro_mcp.py"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\render_book.py"; DestDir: "{app}"; Flags: ignoreversion; Components: core
+Source: "..\german_prep.py"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\render_book.bat"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; Components: core
@@ -87,14 +88,14 @@ Type: files; Name: "{app}\install.log"
 
 [Code]
 const
-  // Downloads are verified against these SHA-256 values; the Piper URL is pinned to a repo revision.
+  // Downloads are verified against these SHA-256 values; the Martin URL is pinned to a repo revision.
   KOKORO_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx';
   KOKORO_SHA = '7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5';
   VOICES_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin';
   VOICES_SHA = 'bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d';
-  PIPER_BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/cf910fb59f1d79ab3b625a63993a108751c6c25d/de/de_DE/thorsten/medium/';
-  PIPER_ONNX_SHA = 'fd270eb3d1ebf91d763f8a0f949b1b1bebdfefaea18c3aaf8577dd34536e064f';
-  PIPER_JSON_SHA = 'cf245c91668e74cb6716f38647ae3d6d9bac42965872596f65f9ab2b7d7221ed';
+  MARTIN_BASE = 'https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804/';
+  MARTIN_ONNX_SHA = 'c302f1d8bc7adf40a842cb550e18c39a5026bdb1afdd29dbb700b501cb49276b';
+  MARTIN_VOICES_SHA = '5b9c8553398d7abf67498ce500c186cefaa7b68fed3e3d415da5380670105acd';
   PYTHON_URL = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe';
   PYTHON_SHA = '67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb';
   FFMPEG_URL = 'https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip';
@@ -216,7 +217,7 @@ end;
 // ------------------------------------------------------------------ selections (also used by the ready page)
 function SelectedAccel: String;
 begin
-  if not WizardIsComponentSelected('english') then
+  if not (WizardIsComponentSelected('english') or WizardIsComponentSelected('german')) then
     Result := 'cpu'
   else
     if AccelPage.SelectedValueIndex = 0 then
@@ -379,16 +380,16 @@ begin
   DetectHardware;
 
   AccelPage := CreateInputOptionPage(wpSelectComponents, 'Hardware acceleration',
-    'How should the English voices run?', '', True, False);
+    'How should the voices run?', '', True, False);
   if NvidiaMajor >= 580 then
     Info := 'Detected: NVIDIA driver version ' + IntToStr(NvidiaMajor) + '.x (supports CUDA 13).'
   else if NvidiaMajor > 0 then
     Info := 'Detected: NVIDIA driver version ' + IntToStr(NvidiaMajor) + '.x. CUDA 13 needs driver 580 or newer, so the CPU is preselected.'
   else
-    Info := 'No NVIDIA GPU was detected, so the CPU is preselected. (AMD and Intel GPUs are not supported for the English voices.)';
-  AccelPage.SubCaptionLabel.Caption := Info + #13#10 + 'The German voice always runs on the CPU, which is fast enough.';
-  AccelPage.Add('NVIDIA GPU with CUDA - about 15x faster than real time (about 1.8 GB extra download)');
-  AccelPage.Add('CPU only - about 3x faster than real time, no extra download');
+    Info := 'No NVIDIA GPU was detected, so the CPU is preselected. (AMD and Intel GPUs are not supported.)';
+  AccelPage.SubCaptionLabel.Caption := Info;
+  AccelPage.Add('NVIDIA GPU with CUDA - English about 15x, German about 3x faster than real time (about 1.8 GB extra download)');
+  AccelPage.Add('CPU only - English about 3x, German only about 1x real time (a 60-minute chapter takes about an hour); no extra download');
   if NvidiaMajor >= 580 then AccelPage.SelectedValueIndex := 0
   else AccelPage.SelectedValueIndex := 1;
 
@@ -415,7 +416,7 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if PageID = AccelPage.ID then
-    Result := not WizardIsComponentSelected('english')
+    Result := not (WizardIsComponentSelected('english') or WizardIsComponentSelected('german'))
   else if PageID = McpPage.ID then
     Result := GetArrayLength(McpIds) = 0;
 end;
@@ -467,8 +468,8 @@ var
   S: String;
 begin
   S := MemoDirInfo + NewLine + NewLine + MemoComponentsInfo;
-  if WizardIsComponentSelected('english') then
-    S := S + NewLine + NewLine + 'English acceleration:' + NewLine + Space + SelectedAccel;
+  if WizardIsComponentSelected('english') or WizardIsComponentSelected('german') then
+    S := S + NewLine + NewLine + 'Acceleration:' + NewLine + Space + SelectedAccel;
   S := S + NewLine + NewLine + 'MCP server will be added to:' + NewLine + Space;
   if SelectedMcpClients = '' then S := S + '(nothing)' else S := S + SelectedMcpClients;
   S := S + NewLine + NewLine + 'Skills:' + NewLine + Space;
@@ -516,10 +517,10 @@ begin
   end;
   if WizardIsComponentSelected('german') then
   begin
-    AddDownloadUnlessPresent(App + '\models\piper\de_DE-thorsten-medium.onnx', PIPER_BASE + 'de_DE-thorsten-medium.onnx',
-      'de_DE-thorsten-medium.onnx', PIPER_ONNX_SHA);
-    AddDownloadUnlessPresent(App + '\models\piper\de_DE-thorsten-medium.onnx.json', PIPER_BASE + 'de_DE-thorsten-medium.onnx.json',
-      'de_DE-thorsten-medium.onnx.json', PIPER_JSON_SHA);
+    AddDownloadUnlessPresent(App + '\models\kokoro-de-martin\kokoro-martin.onnx', MARTIN_BASE + 'kokoro-martin.onnx',
+      'kokoro-martin.onnx', MARTIN_ONNX_SHA);
+    AddDownloadUnlessPresent(App + '\models\kokoro-de-martin\voices-martin.npz', MARTIN_BASE + 'voices-martin.npz',
+      'voices-martin.npz', MARTIN_VOICES_SHA);
   end;
   if FindPython = '' then
     AddDownload(PYTHON_URL, 'python-3.12.10-amd64.exe', PYTHON_SHA);
@@ -585,8 +586,8 @@ begin
   Status('Copying voice models ...');
   CopyDownloaded('kokoro-v1.0.onnx', App + '\models\kokoro-v1.0.onnx');
   CopyDownloaded('voices-v1.0.bin', App + '\models\voices-v1.0.bin');
-  CopyDownloaded('de_DE-thorsten-medium.onnx', App + '\models\piper\de_DE-thorsten-medium.onnx');
-  CopyDownloaded('de_DE-thorsten-medium.onnx.json', App + '\models\piper\de_DE-thorsten-medium.onnx.json');
+  CopyDownloaded('kokoro-martin.onnx', App + '\models\kokoro-de-martin\kokoro-martin.onnx');
+  CopyDownloaded('voices-martin.npz', App + '\models\kokoro-de-martin\voices-martin.npz');
 
   // --- Python 3.12
   PyExe := FindPython;
@@ -626,12 +627,13 @@ begin
       AddProblem('pip could not install the base packages (see install.log).');
       Ok := False;
     end;
-    if Ok and WizardIsComponentSelected('english') then
+    // Martin (German) runs on kokoro-onnx too, so both voices need it.
+    if Ok and (WizardIsComponentSelected('english') or WizardIsComponentSelected('german')) then
       if RunLogged(Args + '-r ' + Q(Reqs + 'requirements-kokoro.txt')) <> 0 then
-        AddProblem('pip could not install kokoro-onnx (English voices will not work).');
+        AddProblem('pip could not install kokoro-onnx (the voices will not work).');
     if Ok and WizardIsComponentSelected('german') then
-      if RunLogged(Args + '--no-deps -r ' + Q(Reqs + 'requirements-piper.txt')) <> 0 then
-        AddProblem('pip could not install piper-tts (German voice will not work).');
+      if RunLogged(Args + '-r ' + Q(Reqs + 'requirements-german.txt')) <> 0 then
+        AddProblem('pip could not install wordfreq (English terms inside German text will not be detected).');
     if Ok and (Accel <> 'cpu') then
     begin
       Status('Installing GPU support (' + Accel + ') ...');

@@ -1,6 +1,6 @@
-"""MCP server (stdio) exposing the local TTS setup (Kokoro + Piper) to a desktop LLM.
+"""MCP server (stdio) exposing the local TTS setup (Kokoro and Martin) to a desktop LLM.
 
-English uses Kokoro (default voice af_sky); German uses Piper (default de_DE-thorsten-medium).
+English uses Kokoro (default voice af_sky); German uses Martin (a German Kokoro fine-tune).
 `language` = "auto" (default) guesses from the text; "en" / "de" force it.
 
 Tools:
@@ -34,13 +34,13 @@ import render_book as rb  # noqa: E402
 JOBS_DIR = HERE / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 DEFAULT_VOICE = rb.EN_DEFAULT_VOICE
-DEFAULT_VOICE_DE = rb.DE_DEFAULT_VOICE
+DEFAULT_VOICE_DE = rb.default_german_voice()
 
 mcp = MCPServer(
     "kokoro-tts",
     instructions=(
         "Local, offline text-to-speech. English uses Kokoro on the GPU (default voice af_sky), "
-        "German uses Piper (default de_DE-thorsten-medium). Leave language='auto' to detect it "
+        "German uses Martin (a German Kokoro fine-tune). Leave language='auto' to detect it "
         "from the text. Use synthesize_text / synthesize_markdown for snippets and "
         "start_book_render for folders of HTML/Markdown chapters (poll get_render_status)."
     ),
@@ -59,7 +59,7 @@ def _prepare(language: str, voice: str, text: str):
         with contextlib.redirect_stdout(sys.stderr):  # keep stdout clean for MCP
             eng = rb.get_engine(kind, voice, "auto")
     except (ImportError, FileNotFoundError) as e:
-        what = "English (Kokoro)" if kind == "kokoro" else "German (Piper)"
+        what = {"kokoro": "English (Kokoro)", "martin": "German (Martin)"}.get(kind, "German (Martin)")
         raise ToolError(f"{what} voices are not installed ({e}). Re-run the Audiobook-MCP setup and tick "
                         "that voice, or pick a language that is installed.") from e
     return eng, voice, lang
@@ -100,8 +100,8 @@ def _voices() -> list[str]:
 
 
 def _german_voices() -> list[str]:
-    """Piper German voices that are downloaded to models/piper."""
-    return sorted(p.stem for p in rb.PIPER_DIR.glob("*.onnx"))
+    """German voices: Martin, if its model is installed."""
+    return [rb.MARTIN_VOICE] if rb.martin_available() else []
 
 
 def _all_voices() -> list[str]:
@@ -112,7 +112,7 @@ def _all_voices() -> list[str]:
 def list_voices() -> dict:
     """List available voices. Kokoro prefixes: af/am = American female/male, bf/bm = British
     female/male (ef/em Spanish, ff French, if/im Italian, jf/jm Japanese, pf/pm Portuguese,
-    zf/zm Chinese, hf/hm Hindi). German voices are Piper models named de_DE-<name>-<quality>.
+    zf/zm Chinese, hf/hm Hindi). German voice: "martin" (English terms and years inside German text are pronounced correctly).
     Leave `voice` empty in the synthesize tools to get the default for the language."""
     return {"defaults": {"en": DEFAULT_VOICE, "de": DEFAULT_VOICE_DE},
             "kokoro_voices": _voices(), "german_voices": _german_voices()}
@@ -123,9 +123,9 @@ def synthesize_text(text: str, output_path: str, voice: str = "", speed: float =
                     language: str = "auto", confirm: bool = False) -> dict:
     """Synthesize plain text into a single 64 kbps MP3 at output_path (must end in .mp3;
     parent folders are created). Blocks until finished. language: "auto" (detect English vs
-    German), "en" or "de"; voice empty = default for the language (af_sky / de_DE-thorsten-
-    medium). Above 20,000 characters it does nothing and returns needs_confirmation with a
-    time estimate: ask the user, then repeat the call with confirm=true."""
+    German), "en" or "de"; voice empty = default for the language (af_sky / martin). Above
+    20,000 characters it does nothing and returns needs_confirmation with a time estimate:
+    ask the user, then repeat the call with confirm=true."""
     if not text.strip():
         raise ToolError("text is empty")
     ask = _needs_confirmation(len(text), confirm)
@@ -168,7 +168,7 @@ def synthesize_markdown(markdown: str, output_path: str, voice: str = "",
     Above 20,000 characters it first returns needs_confirmation with a time estimate: ask the
     user, then repeat the call with confirm=true. The ID3 title defaults to the first '# '
     heading. language: "auto" (detect English vs German), "en" or "de"; voice empty = default
-    for the language (af_sky / de_DE-thorsten-medium)."""
+    for the language (af_sky / martin)."""
     ask = _needs_confirmation(len(markdown), confirm)
     if ask:
         return ask
@@ -205,7 +205,7 @@ def synthesize_markdown(markdown: str, output_path: str, voice: str = "",
         proc = rb.start_ffmpeg(part, tags, eng.sr)
         try:
             with contextlib.redirect_stdout(sys.stderr):  # synth_blocks prints progress
-                audio = rb.synth_blocks(eng, blocks, voice, lang, speed, proc)
+                audio = rb.synth_blocks(eng, blocks, voice, lang, speed, proc, alt=rb.alt_engine_for(eng))
             rb.finish(proc, part, out)
         except BaseException:
             proc.kill()
@@ -225,8 +225,7 @@ def start_book_render(input_dir: str, output_dir: str, voice: str = "",
     one MP3 per chapter in output_dir. Chapters whose MP3 already exists are skipped, so
     re-running resumes. language: "auto" detects English vs German per chapter (so mixed
     folders work), or force "en" / "de"; voice empty = default for the language (af_sky /
-    de_DE-thorsten-medium). Returns a job_id; poll get_render_status. Only one job runs at a
-    time."""
+    martin). Returns a job_id; poll get_render_status. Only one job runs at a time."""
     inp = Path(input_dir)
     if not inp.is_dir() or not any(f for pat in ("*.html", "*.md", "*.markdown")
                                    for f in inp.glob(pat)):
