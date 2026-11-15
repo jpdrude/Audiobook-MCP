@@ -10,7 +10,7 @@
 ;             /SKILLS=none|all|pdf-to-mp3,text-to-mp3  /SKILLTARGETS=none|all|export,claude-code
 
 #define MyAppName "Audiobook-MCP"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppPublisher "Jan Philipp Drude"
 #define MyAppURL "https://github.com/jpdrude/Audiobook-MCP"
 
@@ -47,7 +47,7 @@ Name: "custom"; Description: "Custom"; Flags: iscustom
 [Components]
 Name: "core"; Description: "MCP server, renderer and Python environment"; Types: full custom; Flags: fixed
 Name: "english"; Description: "English voices (Kokoro, about 350 MB download)"; Types: full custom
-Name: "german"; Description: "German voice (Martin, about 330 MB download)"; Types: full custom
+Name: "german"; Description: "German voices (AkinVox: Bernd and 7 more, about 75 MB download plus the English model it is built from)"; Types: full custom
 
 [Files]
 Source: "..\kokoro_mcp.py"; DestDir: "{app}"; Flags: ignoreversion; Components: core
@@ -61,6 +61,9 @@ Source: "register_clients.py"; DestDir: "{app}\installer"; Flags: ignoreversion;
 Source: "install_skills.py"; DestDir: "{app}\installer"; Flags: ignoreversion; Components: core
 Source: "extract_ffmpeg.py"; DestDir: "{app}\installer"; Flags: ignoreversion; Components: core
 Source: "requirements-*.txt"; DestDir: "{app}\installer"; Flags: ignoreversion; Components: core
+Source: "patch_akinvox.py"; DestDir: "{app}\installer"; Flags: ignoreversion; Components: core
+Source: "make_akinvox_delta.py"; DestDir: "{app}\installer"; Flags: ignoreversion; Components: core
+Source: "..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 
 [Icons]
 Name: "{group}\Render a book to MP3"; Filename: "{app}\render_book.bat"; WorkingDir: "{app}"
@@ -88,14 +91,17 @@ Type: files; Name: "{app}\install.log"
 
 [Code]
 const
-  // Downloads are verified against these SHA-256 values; the Martin URL is pinned to a repo revision.
+  // Downloads are verified against these SHA-256 values. The two AkinVox files are release assets of this repository
+  // (made with installer\make_akinvox_delta.py); /ASSETBASE=<url> overrides the location (for testing).
   KOKORO_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx';
   KOKORO_SHA = '7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5';
   VOICES_URL = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin';
   VOICES_SHA = 'bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d';
-  MARTIN_BASE = 'https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804/';
-  MARTIN_ONNX_SHA = 'c302f1d8bc7adf40a842cb550e18c39a5026bdb1afdd29dbb700b501cb49276b';
-  MARTIN_VOICES_SHA = '5b9c8553398d7abf67498ce500c186cefaa7b68fed3e3d415da5380670105acd';
+  ASSET_BASE = 'https://github.com/jpdrude/Audiobook-MCP/releases/download/v0.3.0/';
+  DELTA_NAME = 'akinvox-de-delta.npz';
+  DELTA_SHA = '2fa53a342a2c10ff702efa51711b53f63fcc07867ee69ddeb537a77053f82b5b';
+  DEVOICES_NAME = 'akinvox-de-voices.npz';
+  DEVOICES_SHA = 'f8d4767144bafefa7e4a3e54a12df6fddce9f13e0a081bd2899602dd2438e994';
   PYTHON_URL = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe';
   PYTHON_SHA = '67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb';
   FFMPEG_URL = 'https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip';
@@ -388,8 +394,8 @@ begin
   else
     Info := 'No NVIDIA GPU was detected, so the CPU is preselected. (AMD and Intel GPUs are not supported.)';
   AccelPage.SubCaptionLabel.Caption := Info;
-  AccelPage.Add('NVIDIA GPU with CUDA - English about 15x, German about 3x faster than real time (about 1.8 GB extra download)');
-  AccelPage.Add('CPU only - English about 3x, German only about 1x real time (a 60-minute chapter takes about an hour); no extra download');
+  AccelPage.Add('NVIDIA GPU with CUDA - about 15 to 20x faster than real time (about 1.8 GB extra download)');
+  AccelPage.Add('CPU only - about 5x faster than real time (a 60-minute chapter takes about 12 minutes); no extra download');
   if NvidiaMajor >= 580 then AccelPage.SelectedValueIndex := 0
   else AccelPage.SelectedValueIndex := 1;
 
@@ -502,7 +508,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   I: Integer;
-  App: String;
+  App, Base: String;
 begin
   Result := '';
   App := ExpandConstant('{app}');
@@ -510,17 +516,17 @@ begin
   SetArrayLength(DlName, 0);
   SetArrayLength(DlSha, 0);
 
-  if WizardIsComponentSelected('english') then
-  begin
+  if WizardIsComponentSelected('english') or WizardIsComponentSelected('german') then
     AddDownloadUnlessPresent(App + '\models\kokoro-v1.0.onnx', KOKORO_URL, 'kokoro-v1.0.onnx', KOKORO_SHA);
+  if WizardIsComponentSelected('english') then
     AddDownloadUnlessPresent(App + '\models\voices-v1.0.bin', VOICES_URL, 'voices-v1.0.bin', VOICES_SHA);
-  end;
   if WizardIsComponentSelected('german') then
   begin
-    AddDownloadUnlessPresent(App + '\models\kokoro-de-martin\kokoro-martin.onnx', MARTIN_BASE + 'kokoro-martin.onnx',
-      'kokoro-martin.onnx', MARTIN_ONNX_SHA);
-    AddDownloadUnlessPresent(App + '\models\kokoro-de-martin\voices-martin.npz', MARTIN_BASE + 'voices-martin.npz',
-      'voices-martin.npz', MARTIN_VOICES_SHA);
+    Base := ExpandConstant('{param:ASSETBASE|' + ASSET_BASE + '}');
+    if Copy(Base, Length(Base), 1) <> '/' then Base := Base + '/';
+    if not FileExists(App + '\models\kokoro-de-akinvox\kokoro-de-akinvox.onnx') then
+      AddDownload(Base + DELTA_NAME, DELTA_NAME, DELTA_SHA);
+    AddDownloadUnlessPresent(App + '\models\kokoro-de-akinvox\' + DEVOICES_NAME, Base + DEVOICES_NAME, DEVOICES_NAME, DEVOICES_SHA);
   end;
   if FindPython = '' then
     AddDownload(PYTHON_URL, 'python-3.12.10-amd64.exe', PYTHON_SHA);
@@ -586,8 +592,7 @@ begin
   Status('Copying voice models ...');
   CopyDownloaded('kokoro-v1.0.onnx', App + '\models\kokoro-v1.0.onnx');
   CopyDownloaded('voices-v1.0.bin', App + '\models\voices-v1.0.bin');
-  CopyDownloaded('kokoro-martin.onnx', App + '\models\kokoro-de-martin\kokoro-martin.onnx');
-  CopyDownloaded('voices-martin.npz', App + '\models\kokoro-de-martin\voices-martin.npz');
+  CopyDownloaded(DEVOICES_NAME, App + '\models\kokoro-de-akinvox\' + DEVOICES_NAME);
 
   // --- Python 3.12
   PyExe := FindPython;
@@ -627,13 +632,24 @@ begin
       AddProblem('pip could not install the base packages (see install.log).');
       Ok := False;
     end;
-    // Martin (German) runs on kokoro-onnx too, so both voices need it.
+    // The German voices run on kokoro-onnx too, so both languages need it.
     if Ok and (WizardIsComponentSelected('english') or WizardIsComponentSelected('german')) then
       if RunLogged(Args + '-r ' + Q(Reqs + 'requirements-kokoro.txt')) <> 0 then
         AddProblem('pip could not install kokoro-onnx (the voices will not work).');
     if Ok and WizardIsComponentSelected('german') then
       if RunLogged(Args + '-r ' + Q(Reqs + 'requirements-german.txt')) <> 0 then
         AddProblem('pip could not install wordfreq (English terms inside German text will not be detected).');
+    // German: build the AkinVox model from the English one (needs onnx for a moment).
+    if Ok and WizardIsComponentSelected('german') and FileExists(ExpandConstant('{tmp}\') + DELTA_NAME) then
+    begin
+      Status('Building the German model (about a minute) ...');
+      if (RunLogged(Args + '-r ' + Q(Reqs + 'requirements-akinvox.txt')) <> 0)
+         or (RunLogged(Q(Venv) + ' -I ' + Q(Reqs + 'patch_akinvox.py') + ' ' + Q(App + '\models\kokoro-v1.0.onnx') + ' '
+                       + Q(ExpandConstant('{tmp}\') + DELTA_NAME) + ' ' + Q(App + '\models\kokoro-de-akinvox\kokoro-de-akinvox.onnx')) <> 0)
+         or (not FileExists(App + '\models\kokoro-de-akinvox\kokoro-de-akinvox.onnx')) then
+        AddProblem('The German model could not be built (see install.log). The German voices will not work.');
+      RunLogged(Q(Venv) + ' -m pip uninstall -y onnx');
+    end;
     if Ok and (Accel <> 'cpu') then
     begin
       Status('Installing GPU support (' + Accel + ') ...');

@@ -1,20 +1,29 @@
-"""Text preparation for German voices that run on phonemes (the Martin model).
+"""Text preparation for the German Kokoro voices, which run on phonemes.
 
 * years are spoken the German way (1913 -> "neunzehnhundertdreizehn", 2024 -> "zweitausendvierundzwanzig")
+* abbreviations are spelled out ("Dr." -> "Doktor", "Mr." -> "Mister", "z. B." -> "zum Beispiel")
+* names the phonemizer would read as English words are respelled ("May" -> "Mai", as in Karl May)
 * English terms inside German text (e.g. "postcolonial turn") are phonemized with English rules instead of
   being read with German pronunciation rules
+* the one German phoneme the model's vocabulary lacks (short "ü", as in müssen, würde, zurück) is mapped to the
+  nearest symbol it has; without that the vowel was silently deleted ("fünf" -> "fnf")
 
 English detection is deliberately conservative: runs of English words, and quoted terms judged as a whole.
-Single ambiguous words ("These", "Said") are never switched on their own. Exceptions can be added with two
-optional text files (one entry per line, `#` starts a comment), looked up next to the input and in the
-install folder:
+Single ambiguous words ("These", "Said") are never switched on their own.
 
-    english_terms.txt   words or phrases that must be read with English pronunciation
-    german_words.txt    words that must never be treated as English
+Four optional text files add exceptions (one entry per line, `#` starts a comment). They are looked up next to
+the input and in the install folder, and entries there override the built-in tables:
+
+    english_terms.txt    words or phrases that must be read with English pronunciation
+    german_words.txt     words that must never be treated as English
+    abbreviations.txt    "Prof. = Professor"  (German text);  "en: e.g. = for example"  (English quotes)
+    pronunciations.txt   "May = Mai" (respelling) or "Said = /sɑːˈiːd/" (raw phonemes between slashes);
+                         applied to German text only, whole words, case-sensitive
 """
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 
 try:  # optional: without it only quotes and english_terms.txt are used
@@ -58,6 +67,121 @@ def years_to_words(text: str) -> str:
     return _YEAR_RE.sub(repl, text)
 
 
+# ------------------------------------------------------------------ abbreviations and names
+# written form -> spoken form. A key matches with or without spaces after inner dots ("z. B." / "z.B.").
+DEFAULT_ABBREVIATIONS_DE = {
+    # titles and forms of address
+    "Dr.": "Doktor", "Prof.": "Professor", "Mr.": "Mister", "Mrs.": "Missis", "Ms.": "Miss", "Hr.": "Herr",
+    "Frl.": "Fräulein", "Fa.": "Firma", "Jr.": "Junior", "Sr.": "Senior", "Dipl.": "Diplom",
+    "St. Louis": "Saint Louis", "St.": "Sankt",
+    # common phrases
+    "z. B.": "zum Beispiel", "d. h.": "das heißt", "u. a.": "unter anderem", "u. ä.": "und ähnliches",
+    "o. Ä.": "oder Ähnliches", "o. ä.": "oder ähnliches", "s. o.": "siehe oben", "s. u.": "siehe unten",
+    "u. U.": "unter Umständen", "i. d. R.": "in der Regel", "z. T.": "zum Teil", "v. a.": "vor allem",
+    "m. E.": "meines Erachtens", "a. a. O.": "am angegebenen Ort", "i. e.": "das heißt",
+    "e. g.": "zum Beispiel", "et al.": "und andere", "usw.": "und so weiter", "usf.": "und so fort",
+    "etc.": "et cetera", "bzw.": "beziehungsweise", "bspw.": "beispielsweise", "ggf.": "gegebenenfalls",
+    "evtl.": "eventuell", "ca.": "zirka", "vgl.": "vergleiche", "ebd.": "ebenda", "ibid.": "ebenda",
+    "cf.": "vergleiche", "sog.": "sogenannte", "inkl.": "inklusive", "exkl.": "exklusive", "zzgl.": "zuzüglich",
+    "vs.": "versus",
+    # references (only before a number, so that "die Art." / "der Abs." stay ordinary words)
+    "Nr.": "Nummer", "Nrn.": "Nummern", "Abb.": "Abbildung", "Tab.": "Tabelle", "Kap.": "Kapitel",
+    "Abs.": "Absatz", "Art.": "Artikel", "Anm.": "Anmerkung", "Bd.": "Band", "Bde.": "Bände", "Pkt.": "Punkt",
+    "S.": "Seite", "Ss.": "Seiten", "pp.": "Seiten", "p.": "Seite", "Fig.": "Figur",
+    # publications and counts (after a number: "2. Aufl.", "19. Jh.")
+    "Aufl.": "Auflage", "Jh.": "Jahrhundert", "Jhd.": "Jahrhundert", "Jg.": "Jahrgang", "Std.": "Stunden",
+    "Mio.": "Millionen", "Mrd.": "Milliarden", "Tsd.": "Tausend",
+    # people and bibliography
+    "Hrsg.": "Herausgeber", "hrsg.": "herausgegeben", "Hg.": "Herausgeber", "Übers.": "Übersetzung",
+    "Verf.": "Verfasser", "Diss.": "Dissertation", "geb.": "geboren", "gest.": "gestorben",
+    "Tel.": "Telefon", "Str.": "Straße", "Hbf.": "Hauptbahnhof",
+}
+# English abbreviations inside English quotes (everything else is left to the English phonemizer)
+DEFAULT_ABBREVIATIONS_EN = {
+    "e.g.": "for example", "i.e.": "that is", "cf.": "compare", "et al.": "and others", "vs.": "versus",
+    "etc.": "et cetera", "ibid.": "ibidem", "pp.": "pages", "p.": "page", "Fig.": "Figure", "vol.": "volume",
+}
+# Names the phonemizer reads as English words. Applied to German text only (never inside English quotes).
+DEFAULT_PRONUNCIATIONS = {"May": "Mai"}   # Karl May, not the English month
+
+# only before a number: "Nr. 5", "Abb. 3", "S. 45" ...
+_NEXT_DIGIT = {"Nr.", "Nrn.", "Abb.", "Tab.", "Kap.", "Abs.", "Art.", "Anm.", "Bd.", "Bde.", "Pkt.", "S.", "Ss.",
+               "pp.", "p.", "Fig.", "vol."}
+# only after a number: "2. Aufl.", "19. Jh.", "5 Mio."
+_AFTER_DIGIT = {"Aufl.", "Jh.", "Jhd.", "Jg.", "Std.", "Mio.", "Mrd.", "Tsd."}
+# only before a capitalized word ("St. Gallen" but not "5 St.")
+_NEXT_CAPITAL = {"St."}
+# these may end a sentence: keep the full stop that the abbreviation's dot stood for
+_MAY_END_SENTENCE = {"usw.", "usf.", "etc.", "u. a.", "u. ä.", "o. Ä.", "o. ä.", "ebd.", "ibid.", "et al.",
+                     "a. a. O.", "ff.", "f.", "vs.", "etc."}
+
+
+def _abbr_core(key: str) -> str:
+    """Regex for an abbreviation: spaces after inner dots are optional."""
+    out = []
+    for tok in re.findall(r"\.|\s+|[^.\s]+", key.strip()):
+        if tok == ".":
+            out.append(r"\.")
+        elif tok.isspace():
+            out.append(r"\s*" if out and out[-1] == r"\." else r"\s+")
+        else:
+            out.append(re.escape(tok))
+    return "".join(out)
+
+
+def _compile_abbreviations(table: dict[str, str]):
+    """List of (regex, replacement function) pairs, longest keys first."""
+    rules = []
+    for key, spoken in sorted(table.items(), key=lambda kv: -len(kv[0])):
+        variants = [(key, spoken)]
+        if key[0].islower() and spoken[:1].islower():
+            variants.append((key[0].upper() + key[1:], spoken[0].upper() + spoken[1:]))
+        for k, sp in variants:
+            core = _abbr_core(k)
+            if k in _AFTER_DIGIT:
+                pat = re.compile(r"(?P<pre>\d\.?\s*)" + core + r"(?!\w)")
+            elif k in _NEXT_DIGIT:
+                pat = re.compile(r"(?<![\w.])" + core + r"(?=\s*\d)")
+            elif k in _NEXT_CAPITAL:
+                pat = re.compile(r"(?<![\w.])" + core + r"(?=\s*[A-ZÄÖÜ])")
+            else:
+                pat = re.compile(r"(?<![\w.])" + core + r"(?!\w)")
+            end_ok = key in _MAY_END_SENTENCE
+
+            def repl(m, sp=sp, end_ok=end_ok):
+                spoken_ = sp
+                if end_ok and re.match(r"\s*$|\s+[A-ZÄÖÜ„“\"]", m.string[m.end():]):
+                    spoken_ += "."
+                return (m.group("pre") if "pre" in m.groupdict() else "") + spoken_
+
+            rules.append((pat, repl))
+    return rules
+
+
+# page references after a number: "S. 45 f." / "S. 45 ff."
+_PAGE_FF = re.compile(r"(?<=\d)\s*ff\.")
+_PAGE_F = re.compile(r"(?<=\d)\s*f\.(?=\s|$|[,;)])")
+# note: a trailing full stop after "f."/"ff." is restored when the abbreviation ends the sentence
+
+
+def _read_map(name: str, dirs, lang_prefix: bool = False) -> dict[str, str]:
+    """`key = value` lines; later entries and earlier directories win. With lang_prefix, "en:" lines are
+    returned under a key prefixed with "en:"."""
+    out: dict[str, str] = {}
+    for d in reversed(list(dirs)):                      # first directory has the highest priority
+        p = Path(d) / name
+        if not p.is_file():
+            continue
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
+                continue
+            k, v = (s.strip() for s in line.split("=", 1))
+            if k and v:
+                out[k] = v
+    return out
+
+
 # ------------------------------------------------------------------ English detection
 _DE_STOP = set("""der die das den dem des ein eine einer einem einen eines und oder aber nicht ist sind war waren wird
 werden wurde wurden hat haben hatte hatten sich auch als wie bei nach von vom zum zur mit für auf aus an am im um
@@ -93,9 +217,52 @@ class Lexicon:
     STRONG_DIFF = 0.9   # ... and how much more frequent it must be in English than in German
 
     def __init__(self, dirs=()):
+        dirs = list(dirs)
         self.english = _read_list("english_terms.txt", dirs)
         self.german = _read_list("german_words.txt", dirs)
         self._cache: dict[str, tuple[bool, bool]] = {}
+        user = _read_map("abbreviations.txt", dirs)
+        self._abbr_de = _compile_abbreviations(
+            {**DEFAULT_ABBREVIATIONS_DE, **{k: v for k, v in user.items() if not k.lower().startswith("en:")}})
+        self._abbr_en = _compile_abbreviations(
+            {**DEFAULT_ABBREVIATIONS_EN,
+             **{k[3:].strip(): v for k, v in user.items() if k.lower().startswith("en:")}})
+        self.pron = {**DEFAULT_PRONUNCIATIONS, **_read_map("pronunciations.txt", dirs)}
+        # a name you gave a pronunciation must never be swallowed by an English run ("Edward Said")
+        self._pron_words = {k.lower() for k in self.pron if " " not in k}
+        self._pron_re = (re.compile(r"(?<!\w)(" + "|".join(re.escape(k) for k in sorted(self.pron, key=len, reverse=True))
+                                    + r")(?!\w)") if self.pron else None)
+
+    def expand_abbreviations(self, text: str, lang: str = "de") -> str:
+        """Spell out abbreviations ("Dr." -> "Doktor"). lang is "de" (German text) or "en" (English quotes)."""
+        for pat, repl in (self._abbr_de if lang == "de" else self._abbr_en):
+            text = pat.sub(repl, text)
+        if lang == "de":
+            def page(word):
+                def repl(m):
+                    end = bool(re.match(r"\s*$|\s+[A-ZÄÖÜ„“\"]", m.string[m.end():]))
+                    return " " + word + ("." if end else "")
+                return repl
+
+            text = _PAGE_FF.sub(page("fortfolgende"), text)
+            text = _PAGE_F.sub(page("folgende"), text)
+        return text
+
+    def apply_pronunciations(self, text: str):
+        """Respell names; entries written as /phonemes/ are returned as placeholders plus a list of phoneme
+        strings. Returns (text, raw_phonemes)."""
+        raw: list[str] = []
+        if self._pron_re is None:
+            return text, raw
+
+        def repl(m: re.Match) -> str:
+            val = self.pron[m.group(1)]
+            if len(val) > 2 and val.startswith("/") and val.endswith("/"):
+                raw.append(val[1:-1])
+                return f"{len(raw) - 1}"
+            return val
+
+        return self._pron_re.sub(repl, text), raw
 
     def _freq(self, w: str):
         if zipf_frequency is None:
@@ -108,7 +275,7 @@ class Lexicon:
         if w in self._cache:
             return self._cache[w]
         res = (False, False)
-        if len(w) >= 2 and not re.search(r"[äöüß]", w) and w not in self.german:
+        if len(w) >= 2 and not re.search(r"[äöüß]", w) and w not in self.german and w not in self._pron_words:
             if w in self.english:
                 res = (True, True)
             elif w not in _DE_STOP:
@@ -182,19 +349,66 @@ def english_spans(text: str, lex: Lexicon) -> list[tuple[int, int]]:
 
 
 # ------------------------------------------------------------------ phonemes
-def _phon(tokenizer, text: str, lang: str) -> str:
+# The model's vocabulary has no short "ü" (ʏ, as in müssen, würde, zurück, Stück). kokoro-onnx silently deletes
+# unknown symbols, which turned "fünf" into "fnf". "y" is the same vowel without the length mark.
+PHONEME_MAP = {"ʏ": "y"}
+
+
+def _espeak_lock():
+    try:
+        from kokoro_onnx.tokenizer import _espeak_lock as lock
+        return lock
+    except Exception:  # noqa: BLE001
+        return threading.Lock()
+
+
+_LOCK = _espeak_lock()
+
+
+def _phon_de(tokenizer, text: str) -> str:
+    """German phonemes like tokenizer.phonemize(text, "de"), but with the unknown short ü mapped, not dropped."""
+    import phonemizer
+
+    text = text.strip()
+    if not text:
+        return ""
+    with _LOCK:
+        raw = phonemizer.phonemize(text, "de", preserve_punctuation=True, with_stress=True)
+    raw = "".join(PHONEME_MAP.get(c, c) for c in _MARK.sub("", raw))
+    return "".join(c for c in raw if c in tokenizer.vocab).strip()
+
+
+def _phon_en(tokenizer, text: str, lang: str) -> str:
     return _MARK.sub("", tokenizer.phonemize(text, lang)).strip()
 
 
+_PLACEHOLDER = re.compile("(\\d+)")
+
+
+def _german_segment(tokenizer, seg: str, lex: Lexicon) -> str:
+    seg = lex.expand_abbreviations(seg, "de")
+    seg = years_to_words(seg)
+    seg, raw = lex.apply_pronunciations(seg)
+    if not raw:
+        return _phon_de(tokenizer, seg)
+    out, pos = [], 0
+    for m in _PLACEHOLDER.finditer(seg):            # entries given as /phonemes/ bypass the phonemizer
+        out.append(_phon_de(tokenizer, seg[pos:m.start()]))
+        out.append("".join(c for c in raw[int(m.group(1))] if c in tokenizer.vocab))
+        pos = m.end()
+    out.append(_phon_de(tokenizer, seg[pos:]))
+    return " ".join(p for p in out if p)
+
+
 def to_phonemes(text: str, tokenizer, lex: Lexicon, en_lang: str = "en-us") -> str:
-    """Phoneme string for Kokoro-style models: German rules, English terms with English rules, years as words."""
-    text = years_to_words(text)
+    """Phoneme string for Kokoro-style models. German text: abbreviations spelled out, years as words, names
+    respelled, German rules. English terms and quotes: English rules (digits and abbreviations left to English)."""
     parts, pos = [], 0
     for s, e in english_spans(text, lex):
         if s > pos:
-            parts.append(_phon(tokenizer, text[pos:s], "de"))
-        parts.append(_phon(tokenizer, text[s:e], en_lang))
+            parts.append(_german_segment(tokenizer, text[pos:s], lex))
+        parts.append(_phon_en(tokenizer, lex.expand_abbreviations(text[s:e], "en"), en_lang))
         pos = e
     if pos < len(text):
-        parts.append(_phon(tokenizer, text[pos:], "de"))
+        parts.append(_german_segment(tokenizer, text[pos:], lex))
     return " ".join(p for p in parts if p)

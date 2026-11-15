@@ -1,0 +1,2 @@
+# Only needed once, to build the German model from the English one (patch_akinvox.py); removed again afterwards.
+onnx==1.23.2

@@ -5,14 +5,15 @@ Fast, fully offline text-to-speech on your own PC, packaged as an **MCP server**
 
 - **English** is spoken by [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) through ONNX Runtime, on the
   GPU when one is available (default voice `af_sky`).
-- **German** is spoken by "Martin", a community German fine-tune of the Kokoro architecture
-  ([Godelaune/Kokoro-82M-ONNX-German-Martin](https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin),
-  Apache 2.0), because the official Kokoro model ships no German voices. It runs on the same runtime and GPU.
+- **German** is spoken by the [AkinVox](https://huggingface.co/AKinvox/kokoro-multispeaker) German voices (Apache
+  2.0), default **Bernd**, plus Thorsten, Karlsson, Hokuspokus, Eva K, Mucky, Julia and Kerstin. The official Kokoro
+  model ships no German voices; AkinVox adds a German adapter to it. The installer applies that adapter to the
+  English ONNX model (`installer\patch_akinvox.py`, no PyTorch needed), so German runs on the same runtime and GPU.
 - Nothing leaves your machine. No API keys, no cloud.
 
-Measured on a Windows 11 laptop with an NVIDIA RTX PRO 500 (Blackwell): English on CUDA renders about 13-15x
-faster than real time (a 90-minute chapter in about 6 minutes), German about 3x; on the CPU English runs about 3x
-and German only about 1x real time, so a GPU is recommended for German books.
+Measured on a Windows 11 laptop with an NVIDIA RTX PRO 500 (Blackwell): both languages render about 15-20x faster
+than real time on CUDA (a 90-minute chapter in about 5 minutes) and about 5-6x on the CPU (a 90-minute chapter in
+about 15 minutes).
 
 ## Features
 
@@ -43,10 +44,11 @@ and German only about 1x real time, so a GPU is recommended for German books.
 2 MB: the large parts are downloaded while installing, so the PC must be online). It installs for the current
 user only (no administrator rights) and lets you choose:
 
-- **Voices:** English (Kokoro, about 350 MB) and/or German (Martin, about 330 MB). Downloads are verified against
-  pinned SHA-256 checksums.
-- **Acceleration:** NVIDIA CUDA (preselected if an NVIDIA driver 580 or newer is found) or CPU. German is slow on
-  the CPU (about real time), so choose CUDA if you can.
+- **Voices:** English (Kokoro, about 350 MB) and/or German (AkinVox, about 75 MB on top of the Kokoro model it is
+  built from, so the Kokoro model is downloaded for German too). Downloads are verified against pinned SHA-256
+  checksums; the German patch files are assets of this repository's release.
+- **Acceleration:** NVIDIA CUDA (preselected if an NVIDIA driver 580 or newer is found) or CPU. The CPU is about
+  5x faster than real time, CUDA 15-20x.
 - **MCP server in your AI apps:** it detects Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, LM Studio and
   Gemini CLI and adds the server to the ones you tick. Each changed config file is backed up first, files with
   comments are left alone, and the uninstaller removes only the entry it added.
@@ -61,7 +63,7 @@ ffmpeg if none is on `PATH`.
 Silent install, all choices on the command line:
 
 ```powershell
-Audiobook-MCP-Setup-0.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Tools\Audiobook-MCP" `
+Audiobook-MCP-Setup-0.3.0.exe /VERYSILENT /SUPPRESSMSGBOXES /DIR="C:\Tools\Audiobook-MCP" `
     /COMPONENTS="core,english,german" /ACCEL=cuda /MCPCLIENTS=claude-desktop,cursor `
     /SKILLS=all /SKILLTARGETS=export
 ```
@@ -108,10 +110,10 @@ Check which provider loads: `render_book.py --test` prints `provider=CUDAExecuti
 `CPUExecutionProvider`). If CUDA fails to load, the CUDA/cuDNN wheel versions do not match your `onnxruntime-gpu`
 build; the error message names the missing DLL.
 
-### German voice (Martin)
+### German voices (AkinVox)
 
-Martin runs on `kokoro-onnx` as well, so nothing else is needed for the voice itself. English-term detection in
-German text uses the `wordfreq` word-frequency list:
+The German voices run on `kokoro-onnx` as well. English-term detection in German text uses the `wordfreq`
+word-frequency list:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r installer\requirements-german.txt
@@ -122,22 +124,37 @@ German text uses the `wordfreq` word-frequency list:
 Models are not part of the repository. Put them in `models\` (the folder is git-ignored):
 
 ```powershell
-mkdir models, models\kokoro-de-martin
+mkdir models, models\kokoro-de-akinvox
 
-# Kokoro, English (about 350 MB)
+# Kokoro, English (about 350 MB); the German model is built from this file, so you need it for German too
 $k = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 curl.exe -L --fail -o models\kokoro-v1.0.onnx $k/kokoro-v1.0.onnx
 curl.exe -L --fail -o models\voices-v1.0.bin  $k/voices-v1.0.bin
 
-# Martin, German (about 330 MB), pinned to a repository revision
-$m = "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804"
-curl.exe -L --fail -o models\kokoro-de-martin\kokoro-martin.onnx $m/kokoro-martin.onnx
-curl.exe -L --fail -o models\kokoro-de-martin\voices-martin.npz  $m/voices-martin.npz
+# AkinVox German: a weight patch (about 66 MiB) and the voice styles (4 MB), release assets of this repository
+$r = "https://github.com/jpdrude/Audiobook-MCP/releases/download/v0.3.0"
+curl.exe -L --fail -o akinvox-de-delta.npz  $r/akinvox-de-delta.npz
+curl.exe -L --fail -o models\kokoro-de-akinvox\akinvox-de-voices.npz $r/akinvox-de-voices.npz
+
+# Build the German model from the English one (temporary extra package: onnx)
+.\.venv\Scripts\python.exe -m pip install -r installer\requirements-akinvox.txt
+.\.venv\Scripts\python.exe installer\patch_akinvox.py models\kokoro-v1.0.onnx akinvox-de-delta.npz models\kokoro-de-akinvox\kokoro-de-akinvox.onnx
+.\.venv\Scripts\python.exe -m pip uninstall -y onnx
 ```
 
-SHA-256 of the two Martin files: `c302f1d8bc7adf40a842cb550e18c39a5026bdb1afdd29dbb700b501cb49276b`
-(`kokoro-martin.onnx`) and `5b9c8553398d7abf67498ce500c186cefaa7b68fed3e3d415da5380670105acd`
-(`voices-martin.npz`).
+SHA-256: `kokoro-v1.0.onnx` `7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5`,
+`voices-v1.0.bin` `bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d`,
+`akinvox-de-delta.npz` `2fa53a342a2c10ff702efa51711b53f63fcc07867ee69ddeb537a77053f82b5b`,
+`akinvox-de-voices.npz` `f8d4767144bafefa7e4a3e54a12df6fddce9f13e0a081bd2899602dd2438e994`.
+`patch_akinvox.py` refuses any input that is not exactly the official Kokoro v1.0 model.
+
+The two AkinVox files were made by `installer\make_akinvox_delta.py` (maintainers only; needs PyTorch) from the
+AkinVox German adapter (`adapters/de/adapter.pt`, revision `2b3fa45b`, SHA-256
+`2c6ddf215bfabfcce16efb54fcdaaead4b4dbe4285054b27764c6cfe9b137834`) and the Kokoro-82M weights (revision
+`f3ff3571`). The conversion folds the adapter's low-rank (LoRA) updates into the matching ONNX weights,
+`W' = W + scale * (B @ A)`; 200 of 201 targets are matched (the remaining one is not used at inference). The result
+was checked against the AkinVox author's reference clip. Output is not bit-identical between runs (the model adds
+random noise in its vocoder).
 
 ## Command line
 
@@ -153,7 +170,8 @@ SHA-256 of the two Martin files: `c302f1d8bc7adf40a842cb550e18c39a5026bdb1afdd29
 
 Options: `--lang auto|en|de|<kokoro code>` (default `auto`), `--voice NAME`, `--speed 1.0`,
 `--provider auto|cuda|cpu`, `--title` (override the ID3 title). Without `--voice` the defaults are `af_sky`
-(English) and `martin` (German).
+(English) and `bernd` (German). German voices: `bernd`, `thorsten`, `karlsson`, `hokuspokus`, `eva_k`, `mucky`,
+`julia`, `kerstin`.
 
 `render_book.bat` does the same with a double-click: it activates the venv and asks for the input and output
 folders. Name chapter files `NN_Title.html` so they sort in reading order; track order and the default track
@@ -193,7 +211,7 @@ Notes:
 - `auto` is a small word-count heuristic. For short texts, or text full of quotations in another language, set
   `language` explicitly.
 - Giving a Kokoro voice together with German text makes that voice read German with an accent. Leave `voice`
-  empty for German to get Martin.
+  empty for German to get Bernd.
 - Above 20,000 characters, `synthesize_text` and `synthesize_markdown` first return `needs_confirmation` with a
   time estimate; call again with `confirm=true` to proceed.
 - Only one background job runs at a time.
@@ -209,15 +227,19 @@ Notes:
 This project is MIT licensed (see `LICENSE`). It builds on, but does not include or redistribute:
 
 - [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) and the Kokoro-82M model
-- The German "Martin" model: ONNX export by Godelaune of
-  [kikiri-tts/kikiri-german-martin](https://huggingface.co/kikiri-tts/kikiri-german-martin), trained on a German
-  multispeaker base by dida-80b (voice recordings of Martin Harbecke, according to the model card)
+- [AkinVox Kokoro Multispeaker](https://huggingface.co/AKinvox/kokoro-multispeaker), Apache 2.0, the German
+  adapter and voices; our patch files are a converted, modified form of it (see `NOTICE.md` for the voice
+  sources and licenses, among them CC BY 4.0 for the voice "Mucky")
 - [wordfreq](https://github.com/rspeer/wordfreq), used to tell English words from German ones
 - [ONNX Runtime](https://onnxruntime.ai/), [ffmpeg](https://ffmpeg.org/) and the
   [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
 Each of these has its own license; check their repositories before redistributing anything built from them. The
-Martin model is a community model whose provenance chain (Kokoro, a German multispeaker base, a single-speaker
-fine-tune, an ONNX export) is documented only on its model cards. The model files you download are covered by their own licenses, not by this one.
+model files you download are covered by their own licenses, not by this one. The German voices are AI-generated
+speech; label audio you publish accordingly.
+
+Version 0.3.0 replaces the German voice "Martin" (0.2.0) with the AkinVox voices; Martin is no longer supported.
+Caveats: AkinVox was developed with eSpeak-NG 1.51, this project uses 1.52 (small pronunciation differences are
+possible), and the model sometimes renders a faint low hum before pauses.
 
 Rendering audio from a copyrighted book is fine for your own use, but do not redistribute the resulting MP3s.

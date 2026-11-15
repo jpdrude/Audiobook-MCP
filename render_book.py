@@ -1,7 +1,8 @@
 """Render HTML/Markdown chapters to MP3 with local neural TTS.
 
 Engines: Kokoro (kokoro-onnx, GPU if possible) for English and other Kokoro languages;
-"Martin" (a German Kokoro fine-tune, same runtime) for German. German text is prepared first: years are
+the AkinVox German voices (Bernd, Thorsten, ...: the Kokoro model with patched weights) for German.
+German text is prepared first: years are
 spoken the German way and English terms inside German text get English pronunciation (see german_prep.py).
 
 Usage:
@@ -10,7 +11,7 @@ Usage:
   render_book.py --test [--lang de] [--out-file OUTPUT_FILE.mp3]
 
 --lang auto (default) guesses English vs German per file. Without --voice the defaults are
-af_sky (English) and martin (German).
+af_sky (English) and bernd (German).
 """
 import argparse
 import html
@@ -32,20 +33,26 @@ PAUSE_PARA = 0.45
 _LOCAL_FFMPEG = HERE / "ffmpeg" / "bin" / "ffmpeg.exe"
 FFMPEG = str(_LOCAL_FFMPEG) if _LOCAL_FFMPEG.exists() else "ffmpeg"
 EN_DEFAULT_VOICE = "af_sky"
-# German voice: the Kokoro-architecture fine-tune "Martin" (community model, Apache 2.0)
-MARTIN_DIR = HERE / "models" / "kokoro-de-martin"
-MARTIN_MODEL = MARTIN_DIR / "kokoro-martin.onnx"
-MARTIN_VOICES = MARTIN_DIR / "voices-martin.npz"
-MARTIN_VOICE = "martin"
+# AkinVox German voices (Bernd, Thorsten, ...): the official Kokoro v1.0 ONNX model with 200 weight tensors patched by
+# installer/patch_akinvox.py (low-rank updates from https://huggingface.co/AKinvox/kokoro-multispeaker, Apache-2.0)
+AKINVOX_DIR = HERE / "models" / "kokoro-de-akinvox"
+AKINVOX_MODEL = AKINVOX_DIR / "kokoro-de-akinvox.onnx"
+AKINVOX_VOICES = AKINVOX_DIR / "akinvox-de-voices.npz"
+AKINVOX_VOICE_NAMES = ("bernd", "thorsten", "karlsson", "hokuspokus", "eva_k", "mucky", "julia", "kerstin")
 LEXICON_DIRS = [str(HERE)]   # where english_terms.txt / german_words.txt are looked up (input folder is added)
 
 
-def martin_available():
-    return MARTIN_MODEL.exists() and MARTIN_VOICES.exists()
+def akinvox_available():
+    return AKINVOX_MODEL.exists() and AKINVOX_VOICES.exists()
+
+
+def german_voices():
+    """German voices whose models are installed."""
+    return list(AKINVOX_VOICE_NAMES) if akinvox_available() else []
 
 
 def default_german_voice():
-    return MARTIN_VOICE
+    return "bernd"
 
 
 def make_kokoro(provider_pref, model=MODEL, voices=VOICES):
@@ -98,9 +105,9 @@ def resolve(lang_arg, voice_arg, sample_text=""):
     lang = (lang_arg or "auto").lower()
     voice = voice_arg or ""
     if lang == "auto":
-        lang = "de" if (voice == MARTIN_VOICE or detect_language(sample_text) == "de") else "en"
-    if voice == MARTIN_VOICE or (lang.startswith("de") and not voice):   # default German voice
-        return "martin", MARTIN_VOICE, "de"
+        lang = "de" if (voice in AKINVOX_VOICE_NAMES or detect_language(sample_text) == "de") else "en"
+    if voice in AKINVOX_VOICE_NAMES or (lang.startswith("de") and not voice):   # default German voice: Bernd
+        return "akinvox", voice or default_german_voice(), "de"
     if lang.startswith("de"):                 # explicit non-German Kokoro voice reading German
         return "kokoro", voice, "de"
     voice = voice or EN_DEFAULT_VOICE
@@ -122,43 +129,59 @@ class KokoroEngine:
         return s, sr
 
 
-class MartinEngine:
-    """German Kokoro fine-tune. Text is converted to phonemes first (german_prep): English terms get English
-    pronunciation, years are spoken the German way."""
+class _GermanEngine:
+    """German Kokoro-architecture voices. Text is converted to phonemes first (german_prep): English terms get
+    English pronunciation, years are spoken the German way."""
 
-    kind = "martin"
+    kind = None
 
     def __init__(self, provider_pref):
         import german_prep
 
-        self.k, self.provider = make_kokoro(provider_pref, MARTIN_MODEL, MARTIN_VOICES)
+        self._load(provider_pref)
         self.sr = SR
         self._prep = german_prep
         self._lex = german_prep.Lexicon(LEXICON_DIRS)
         self.en_lang = "en-us"
 
+    def _voice(self, voice):
+        return voice
+
     def synth(self, text, voice=None, lang=None, speed=1.0):
         ph = self._prep.to_phonemes(text, self.k.tokenizer, self._lex, self.en_lang)
         if not ph.strip():
             return np.zeros(0, dtype=np.float32), SR
-        s, sr = self.k.create(ph, voice=MARTIN_VOICE, speed=speed, lang="de", is_phonemes=True)
+        s, sr = self.k.create(ph, voice=self._voice(voice), speed=speed, lang="de", is_phonemes=True)
         assert sr == SR, sr
         return s, sr
+
+
+class AkinvoxEngine(_GermanEngine):
+    """AkinVox German voices: Kokoro v1.0 ONNX graph (no slow Loop) with patched weights, 8 voices."""
+
+    kind = "akinvox"
+
+    def _load(self, provider_pref):
+        self.k, self.provider = make_kokoro(provider_pref, AKINVOX_MODEL, AKINVOX_VOICES)
+
+    def _voice(self, voice):
+        return voice if voice in AKINVOX_VOICE_NAMES else default_german_voice()
 
 
 _engines = {}
 
 
 def get_engine(kind, voice, provider_pref="auto"):
-    """Engines are cached: one Kokoro session and one Martin session."""
+    """Engines are cached: one session per model (Kokoro English, AkinVox German)."""
     if kind not in _engines:
-        _engines[kind] = KokoroEngine(provider_pref) if kind == "kokoro" else MartinEngine(provider_pref)
+        cls = {"kokoro": KokoroEngine, "akinvox": AkinvoxEngine}[kind]
+        _engines[kind] = cls(provider_pref)
     return _engines[kind]
 
 
 def alt_engine_for(engine, provider_pref="auto"):
     """Engine for whole English blocks inside a German document (only when sample rates match)."""
-    if engine.kind != "martin" or not (MODEL.exists() and VOICES.exists()):
+    if engine.kind != "akinvox" or not (MODEL.exists() and VOICES.exists()):
         return None
     try:
         return get_engine("kokoro", EN_DEFAULT_VOICE, provider_pref)
@@ -394,7 +417,8 @@ def main():
     ap.add_argument("--artist", default="", help="ID3 artist (empty = no tag)")
     ap.add_argument("--album", default="", help="ID3 album (empty = no tag)")
     ap.add_argument("--title", default="", help="override the ID3 title for every file")
-    ap.add_argument("--voice", default="", help="default: af_sky (English) / martin (German)")
+    ap.add_argument("--voice", default="", help="default: af_sky (English) / bernd (German). German voices: "
+                    "bernd, thorsten, karlsson, hokuspokus, eva_k, mucky, julia, kerstin")
     ap.add_argument("--lang", default="auto", help="auto, en, de, or a Kokoro lang code")
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--provider", default="auto", choices=["auto", "cuda", "cpu"])
